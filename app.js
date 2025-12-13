@@ -1,5 +1,5 @@
-// Sector Z-Score Dashboard v2
-// With Yahoo + Stooq fallback, caching, retries
+// Sector Z-Score Dashboard v3 - Optimized
+// Parallel loading + proxy racing for speed
 
 const AVAILABLE_SECTORS = [
     { ticker: 'XLB', name: 'Materials', color: '#f97316' },
@@ -29,108 +29,113 @@ let charts = {};
 let benchmarkPrices = null;
 let isLoading = false;
 
-// Cache with 6 hour TTL
-const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+// 24 hour cache (more aggressive)
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
-function sleep(ms) {
-    return new Promise(r => setTimeout(r, ms));
+// Try to load cache from localStorage on startup
+try {
+    const saved = localStorage.getItem('priceCache');
+    if (saved) {
+        const parsed = JSON.parse(saved);
+        Object.entries(parsed).forEach(([k, v]) => {
+            if (Date.now() - v.ts < CACHE_TTL_MS) {
+                v.data = v.data.map(p => ({ ...p, date: new Date(p.date) }));
+                _cache.set(k, v);
+            }
+        });
+    }
+} catch (e) {}
+
+function saveCache() {
+    try {
+        const obj = {};
+        _cache.forEach((v, k) => { obj[k] = v; });
+        localStorage.setItem('priceCache', JSON.stringify(obj));
+    } catch (e) {}
 }
 
-async function fetchWithTimeout(url, opts = {}, timeoutMs = 15000) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+// Race multiple proxies - use fastest response
+async function fetchWithRace(url, timeoutMs = 12000) {
+    const proxies = [
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+        `https://corsproxy.io/?${encodeURIComponent(url)}`,
+        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    ];
+    
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    
     try {
-        return await fetch(url, { ...opts, signal: ctrl.signal });
-    } finally {
-        clearTimeout(t);
+        const response = await Promise.any(
+            proxies.map(async (proxyUrl) => {
+                const res = await fetch(proxyUrl, { 
+                    signal: controller.signal,
+                    headers: { 'Accept': 'application/json' }
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const text = await res.text();
+                if (!text.trim().startsWith('{') && !text.trim().startsWith('[') && !text.trim().startsWith('Date,')) {
+                    throw new Error('Not valid data');
+                }
+                return text;
+            })
+        );
+        clearTimeout(timeout);
+        return response;
+    } catch (e) {
+        clearTimeout(timeout);
+        throw new Error('All proxies failed');
     }
 }
 
-function isLikelyJson(text) {
-    const s = text.trim();
-    return s.startsWith('{') || s.startsWith('[');
-}
-
-// Yahoo Finance fetch with retries
 async function fetchYahoo(ticker) {
-    const cacheKey = `yahoo:${ticker}`;
+    const cacheKey = `y:${ticker}`;
     const hit = _cache.get(cacheKey);
     if (hit && Date.now() - hit.ts < CACHE_TTL_MS) return hit.data;
 
-    const years = 15;
     const p2 = Math.floor(Date.now() / 1000);
-    const p1 = p2 - Math.floor(years * 365.25 * 24 * 60 * 60);
-
+    const p1 = p2 - Math.floor(15 * 365.25 * 24 * 60 * 60);
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?period1=${p1}&period2=${p2}&interval=1wk&includeAdjustedClose=true`;
-    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
 
-    let lastErr;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-            const res = await fetchWithTimeout(proxyUrl, { headers: { Accept: 'application/json' } }, 15000);
-            if (!res.ok) throw new Error(`Yahoo proxy HTTP ${res.status}`);
+    const text = await fetchWithRace(url);
+    const data = JSON.parse(text);
 
-            const text = await res.text();
-            if (!isLikelyJson(text)) {
-                throw new Error(`Yahoo returned non-JSON (rate-limit/proxy issue)`);
-            }
+    if (data?.chart?.error) throw new Error(data.chart.error.description);
+    
+    const result = data?.chart?.result?.[0];
+    if (!result) throw new Error('No data');
 
-            const data = JSON.parse(text);
+    const ts = result.timestamp || [];
+    const closes = result.indicators?.adjclose?.[0]?.adjclose || result.indicators?.quote?.[0]?.close || [];
 
-            if (data?.chart?.error) {
-                throw new Error(`Yahoo error: ${data.chart.error.description || data.chart.error.code}`);
-            }
-
-            const result = data?.chart?.result?.[0];
-            if (!result) throw new Error('Yahoo: missing chart.result[0]');
-
-            const ts = result.timestamp || [];
-            const closes = result.indicators?.adjclose?.[0]?.adjclose || result.indicators?.quote?.[0]?.close || [];
-
-            const prices = [];
-            for (let i = 0; i < ts.length; i++) {
-                const c = closes[i];
-                if (c != null && c > 0) prices.push({ date: new Date(ts[i] * 1000), close: c });
-            }
-
-            if (prices.length < 60) throw new Error(`Yahoo: too few data points for ${ticker} (${prices.length})`);
-
-            _cache.set(cacheKey, { ts: Date.now(), data: prices });
-            return prices;
-        } catch (e) {
-            lastErr = e;
-            await sleep(350 * attempt);
+    const prices = [];
+    for (let i = 0; i < ts.length; i++) {
+        if (closes[i] != null && closes[i] > 0) {
+            prices.push({ date: new Date(ts[i] * 1000), close: closes[i] });
         }
     }
-    throw lastErr;
-}
 
-// Stooq fallback (CSV)
-function toStooqSymbol(ticker) {
-    const t = ticker.trim();
-    if (t.includes('.')) return t.toLowerCase();
-    return `${t.toLowerCase()}.us`;
+    if (prices.length < 50) throw new Error('Insufficient data');
+
+    _cache.set(cacheKey, { ts: Date.now(), data: prices });
+    saveCache();
+    return prices;
 }
 
 async function fetchStooq(ticker) {
-    const cacheKey = `stooq:${ticker}`;
+    const cacheKey = `s:${ticker}`;
     const hit = _cache.get(cacheKey);
     if (hit && Date.now() - hit.ts < CACHE_TTL_MS) return hit.data;
 
-    const sym = toStooqSymbol(ticker);
+    const sym = ticker.includes('.') ? ticker.toLowerCase() : `${ticker.toLowerCase()}.us`;
     const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(sym)}&i=w`;
-    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
 
-    const res = await fetchWithTimeout(proxyUrl, {}, 15000);
-    if (!res.ok) throw new Error(`Stooq HTTP ${res.status}`);
+    const text = await fetchWithRace(url, 15000);
+    
+    if (!text.startsWith('Date,')) throw new Error('Invalid CSV');
 
-    const csv = (await res.text()).trim();
-    if (!csv.startsWith('Date,')) {
-        throw new Error(`Stooq returned unexpected content for ${ticker}`);
-    }
-
-    const lines = csv.split(/\r?\n/);
+    const lines = text.split(/\r?\n/);
     const header = lines.shift().split(',');
     const iDate = header.indexOf('Date');
     const iClose = header.indexOf('Close');
@@ -138,26 +143,34 @@ async function fetchStooq(ticker) {
     const prices = [];
     for (const line of lines) {
         const cols = line.split(',');
-        const d = cols[iDate];
-        const c = cols[iClose];
-        const close = Number(c);
-        if (!d || !Number.isFinite(close) || close <= 0) continue;
-        prices.push({ date: new Date(d), close });
+        const close = Number(cols[iClose]);
+        if (cols[iDate] && Number.isFinite(close) && close > 0) {
+            prices.push({ date: new Date(cols[iDate]), close });
+        }
     }
-
     prices.sort((a, b) => a.date - b.date);
 
-    if (prices.length < 60) throw new Error(`Stooq: too few data points for ${ticker} (${prices.length})`);
+    if (prices.length < 50) throw new Error('Insufficient data');
 
     _cache.set(cacheKey, { ts: Date.now(), data: prices });
+    saveCache();
     return prices;
 }
 
-// Main fetch with fallback
 async function fetchPrices(ticker) {
+    const yahooKey = `y:${ticker}`;
+    const stooqKey = `s:${ticker}`;
+    
+    if (_cache.has(yahooKey) && Date.now() - _cache.get(yahooKey).ts < CACHE_TTL_MS) {
+        return _cache.get(yahooKey).data;
+    }
+    if (_cache.has(stooqKey) && Date.now() - _cache.get(stooqKey).ts < CACHE_TTL_MS) {
+        return _cache.get(stooqKey).data;
+    }
+
     try {
         return await fetchYahoo(ticker);
-    } catch (e1) {
+    } catch (e) {
         console.log(`Yahoo failed for ${ticker}, trying Stooq...`);
         return await fetchStooq(ticker);
     }
@@ -172,8 +185,9 @@ function calculateRollingReturn(prices, weeks) {
     for (let i = weeks; i < prices.length; i++) {
         const prev = prices[i - weeks]?.close;
         const cur = prices[i]?.close;
-        if (!prev || !cur) continue;
-        returns.push({ date: prices[i].date, value: ((cur / prev) - 1) * 100 });
+        if (prev && cur) {
+            returns.push({ date: prices[i].date, value: ((cur / prev) - 1) * 100 });
+        }
     }
     return returns;
 }
@@ -181,26 +195,21 @@ function calculateRollingReturn(prices, weeks) {
 function calculateRelativeReturns(sectorReturns, benchReturns) {
     const benchMap = new Map();
     benchReturns.forEach(r => {
-        const key = `${r.date.getFullYear()}-${r.date.getMonth()}-${r.date.getDate()}`;
-        benchMap.set(key, r.value);
+        benchMap.set(`${r.date.getFullYear()}-${r.date.getMonth()}-${r.date.getDate()}`, r.value);
     });
     
-    return sectorReturns
-        .map(r => {
-            const key = `${r.date.getFullYear()}-${r.date.getMonth()}-${r.date.getDate()}`;
-            let benchVal = benchMap.get(key);
-            
-            if (benchVal === undefined) {
-                for (let offset = 1; offset <= 7 && benchVal === undefined; offset++) {
-                    const d = new Date(r.date);
-                    d.setDate(d.getDate() - offset);
-                    benchVal = benchMap.get(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
-                }
+    return sectorReturns.map(r => {
+        const key = `${r.date.getFullYear()}-${r.date.getMonth()}-${r.date.getDate()}`;
+        let benchVal = benchMap.get(key);
+        if (benchVal === undefined) {
+            for (let o = 1; o <= 7 && benchVal === undefined; o++) {
+                const d = new Date(r.date);
+                d.setDate(d.getDate() - o);
+                benchVal = benchMap.get(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
             }
-            
-            return benchVal !== undefined ? { date: r.date, value: r.value - benchVal } : null;
-        })
-        .filter(Boolean);
+        }
+        return benchVal !== undefined ? { date: r.date, value: r.value - benchVal } : null;
+    }).filter(Boolean);
 }
 
 function calculateZScore(returns, windowWeeks) {
@@ -217,8 +226,7 @@ function calculateZScore(returns, windowWeeks) {
         if (std > 0.5) {
             zscores.push({
                 date: returns[i].date,
-                value: Math.max(-4, Math.min(4, (returns[i].value - mean) / std)),
-                relativeReturn: returns[i].value
+                value: Math.max(-4, Math.min(4, (returns[i].value - mean) / std))
             });
         }
     }
@@ -234,7 +242,7 @@ function resampleMonthly(data) {
     return Array.from(monthly.values()).sort((a, b) => a.date - b.date);
 }
 
-async function calculateSectorZScore(sectorPrices) {
+function calculateSectorZScore(sectorPrices) {
     const returnYears = parseInt(document.getElementById('returnPeriod').value);
     const zscoreYears = parseInt(document.getElementById('zscoreWindow').value);
     
@@ -276,7 +284,7 @@ function initSectorTags() {
     });
 }
 
-function toggleSector(sector) {
+async function toggleSector(sector) {
     const idx = activeSectors.findIndex(s => s.ticker === sector.ticker);
     if (idx >= 0) {
         activeSectors.splice(idx, 1);
@@ -285,14 +293,30 @@ function toggleSector(sector) {
             charts[sector.ticker].destroy();
             delete charts[sector.ticker];
         }
+        initSectorTags();
+        renderCharts();
+        updateReadings();
+        saveState();
     } else {
         activeSectors.push(sector);
-        loadSectorData(sector);
+        initSectorTags();
+        renderCharts();
+        
+        try {
+            setStatus('loading', `Loading ${sector.ticker}...`);
+            const prices = await fetchPrices(sector.ticker);
+            sectorData[sector.ticker] = calculateSectorZScore(prices);
+            setStatus('ready', 'Ready');
+        } catch (e) {
+            sectorData[sector.ticker] = [];
+            setStatus('error', `Failed: ${sector.ticker}`);
+            setTimeout(() => setStatus('ready', 'Ready'), 2000);
+        }
+        
+        renderCharts();
+        updateReadings();
+        saveState();
     }
-    initSectorTags();
-    renderCharts();
-    updateReadings();
-    saveState();
 }
 
 function addCustomTicker() {
@@ -312,17 +336,8 @@ function addCustomTicker() {
     if (existing) {
         toggleSector(existing);
     } else {
-        const newSector = { 
-            ticker, 
-            name: nameInput.value.trim() || ticker, 
-            color: generateColor(), 
-            custom: true 
-        };
-        activeSectors.push(newSector);
-        loadSectorData(newSector);
-        initSectorTags();
-        renderCharts();
-        saveState();
+        const newSector = { ticker, name: nameInput.value.trim() || ticker, color: generateColor(), custom: true };
+        toggleSector(newSector);
     }
     
     tickerInput.value = '';
@@ -330,56 +345,49 @@ function addCustomTicker() {
 }
 
 function removeCustomSector(ticker) {
-    const idx = activeSectors.findIndex(s => s.ticker === ticker);
-    if (idx >= 0) {
-        activeSectors.splice(idx, 1);
-        delete sectorData[ticker];
-        if (charts[ticker]) {
-            charts[ticker].destroy();
-            delete charts[ticker];
-        }
-        initSectorTags();
-        renderCharts();
-        updateReadings();
-        saveState();
-    }
+    const sector = activeSectors.find(s => s.ticker === ticker);
+    if (sector) toggleSector(sector);
 }
 
-async function loadSectorData(sector) {
-    try {
-        setStatus('loading', `Loading ${sector.ticker}...`);
-        const prices = await fetchPrices(sector.ticker);
-        const zscores = await calculateSectorZScore(prices);
-        sectorData[sector.ticker] = zscores;
-        renderCharts();
-        updateReadings();
-        setStatus('ready', 'Ready');
-    } catch (err) {
-        console.error(`Error loading ${sector.ticker}:`, err);
-        sectorData[sector.ticker] = [];
-        renderCharts();
-        setStatus('error', `Failed: ${sector.ticker}`);
-        setTimeout(() => setStatus('ready', 'Ready'), 2000);
-    }
-}
-
+// PARALLEL loading - much faster!
 async function refreshAllData() {
     if (isLoading) return;
     isLoading = true;
+    
+    const startTime = Date.now();
     
     try {
         const benchmark = document.getElementById('benchmark').value;
         setStatus('loading', `Loading ${benchmark}...`);
         
         benchmarkPrices = await fetchPrices(benchmark);
-        console.log(`Loaded ${benchmarkPrices.length} weeks of ${benchmark}`);
         
-        for (const sector of activeSectors) {
-            await loadSectorData(sector);
-        }
+        setStatus('loading', `Loading ${activeSectors.length} sectors...`);
         
-        document.getElementById('lastUpdated').textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+        // Load ALL sectors in parallel!
+        const results = await Promise.allSettled(
+            activeSectors.map(async (sector) => {
+                const prices = await fetchPrices(sector.ticker);
+                return { ticker: sector.ticker, data: calculateSectorZScore(prices) };
+            })
+        );
+        
+        results.forEach((result, i) => {
+            if (result.status === 'fulfilled') {
+                sectorData[result.value.ticker] = result.value.data;
+            } else {
+                sectorData[activeSectors[i].ticker] = [];
+                console.error(`Failed: ${activeSectors[i].ticker}`, result.reason);
+            }
+        });
+        
+        renderCharts();
+        updateReadings();
+        
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        document.getElementById('lastUpdated').textContent = `Loaded in ${elapsed}s`;
         setStatus('ready', 'Ready');
+        
     } catch (err) {
         console.error('Refresh error:', err);
         setStatus('error', err.message);
@@ -399,7 +407,7 @@ function renderCharts() {
     const container = document.getElementById('chartsContainer');
     
     if (activeSectors.length === 0) {
-        container.innerHTML = `<div class="no-charts"><p>No sectors selected</p><p style="font-size: 0.8rem;">Click on sectors above to add them</p></div>`;
+        container.innerHTML = `<div class="no-charts"><p>No sectors selected</p><p style="font-size: 0.8rem;">Click sectors above to add them</p></div>`;
         return;
     }
     
@@ -418,7 +426,7 @@ function renderCharts() {
                     <span class="current-value ${valueClass}">${valueStr}</span>
                 </div>
                 <div class="chart-wrapper">
-                    ${hasError ? `<div class="error">Failed to load data</div>` :
+                    ${hasError ? `<div class="error">Failed to load</div>` :
                       data && data.length > 0 ? `<canvas id="chart-${sector.ticker}"></canvas>` :
                       `<div class="loading">Loading...</div>`}
                 </div>
@@ -457,7 +465,7 @@ function createChart(ticker, data, color) {
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            animation: { duration: 300 },
+            animation: false,
             plugins: {
                 legend: { display: false },
                 tooltip: {
@@ -472,7 +480,7 @@ function createChart(ticker, data, color) {
                     type: 'time',
                     time: { unit: 'year', displayFormats: { year: 'yyyy' } },
                     grid: { color: '#1a1a2e' },
-                    ticks: { color: '#555', maxTicksLimit: 10 }
+                    ticks: { color: '#555', maxTicksLimit: 8 }
                 },
                 y: {
                     min: -4, max: 4,
