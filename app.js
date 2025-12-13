@@ -226,7 +226,7 @@ function calculateZScore(returns, windowWeeks) {
         if (std > 0.5) {
             zscores.push({
                 date: returns[i].date,
-                value: Math.max(-4, Math.min(4, (returns[i].value - mean) / std))
+                value: Math.max(-6, Math.min(6, (returns[i].value - mean) / std))
             });
         }
     }
@@ -450,17 +450,33 @@ function createChart(ticker, data, color) {
     
     if (charts[ticker]) charts[ticker].destroy();
     
+    // Calculate average Z-score across all active sectors for each date
+    const avgData = calculateAverageZScore(data);
+    
     charts[ticker] = new Chart(canvas.getContext('2d'), {
         type: 'line',
         data: {
-            datasets: [{
-                data: data.map(d => ({ x: d.date, y: d.value })),
-                borderColor: color,
-                backgroundColor: 'transparent',
-                borderWidth: 2,
-                pointRadius: 0,
-                tension: 0.1
-            }]
+            datasets: [
+                {
+                    data: data.map(d => ({ x: d.date, y: d.value })),
+                    borderColor: color,
+                    backgroundColor: 'transparent',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.1,
+                    order: 1
+                },
+                {
+                    data: avgData,
+                    borderColor: 'rgba(255, 255, 255, 0.3)',
+                    backgroundColor: 'transparent',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    tension: 0.1,
+                    borderDash: [4, 4],
+                    order: 2
+                }
+            ]
         },
         options: {
             responsive: true,
@@ -471,7 +487,7 @@ function createChart(ticker, data, color) {
                 tooltip: {
                     callbacks: {
                         title: ctx => ctx[0].raw.x.toLocaleDateString(),
-                        label: ctx => `Z-Score: ${ctx.parsed.y.toFixed(2)}`
+                        label: ctx => ctx.datasetIndex === 0 ? `Z-Score: ${ctx.parsed.y.toFixed(2)}` : `Avg: ${ctx.parsed.y.toFixed(2)}`
                     }
                 }
             },
@@ -483,7 +499,7 @@ function createChart(ticker, data, color) {
                     ticks: { color: '#555', maxTicksLimit: 8 }
                 },
                 y: {
-                    min: -4, max: 4,
+                    min: -6, max: 6,
                     grid: { color: '#1a1a2e' },
                     ticks: { color: '#555' }
                 }
@@ -505,6 +521,38 @@ function createChart(ticker, data, color) {
             }
         }]
     });
+}
+
+// Calculate average Z-score across all sectors for overlay
+function calculateAverageZScore(currentData) {
+    if (activeSectors.length <= 1) return [];
+    
+    // Build a map of date -> array of values
+    const dateMap = new Map();
+    
+    activeSectors.forEach(sector => {
+        const data = sectorData[sector.ticker];
+        if (!data) return;
+        
+        data.forEach(d => {
+            const key = d.date.getTime();
+            if (!dateMap.has(key)) {
+                dateMap.set(key, []);
+            }
+            dateMap.get(key).push(d.value);
+        });
+    });
+    
+    // Calculate average for each date
+    const avgData = [];
+    dateMap.forEach((values, timestamp) => {
+        if (values.length >= 2) {
+            const avg = values.reduce((a, b) => a + b, 0) / values.length;
+            avgData.push({ x: new Date(timestamp), y: avg });
+        }
+    });
+    
+    return avgData.sort((a, b) => a.x - b.x);
 }
 
 function updateReadings() {
