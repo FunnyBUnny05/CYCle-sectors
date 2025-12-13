@@ -1,7 +1,7 @@
-// Sector Z-Score Dashboard v3 - Optimized
-// Parallel loading + proxy racing for speed
+// Sector Z-Score Dashboard v4 - Simplified
+// Single sector view with S&P 500 comparison
 
-const AVAILABLE_SECTORS = [
+const SECTORS = [
     { ticker: 'XLB', name: 'Materials', color: '#f97316' },
     { ticker: 'XLE', name: 'Energy', color: '#3b82f6' },
     { ticker: 'XLF', name: 'Financials', color: '#a855f7' },
@@ -23,17 +23,15 @@ const AVAILABLE_SECTORS = [
     { ticker: 'IYT', name: 'Transportation', color: '#38bdf8' },
 ];
 
-let activeSectors = [];
-let sectorData = {};
-let charts = {};
+let selectedSector = null;
+let sectorZScores = {};
 let benchmarkPrices = null;
+let chart = null;
 let isLoading = false;
 
-// 24 hour cache (more aggressive)
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
-// Try to load cache from localStorage on startup
 try {
     const saved = localStorage.getItem('priceCache');
     if (saved) {
@@ -55,7 +53,6 @@ function saveCache() {
     } catch (e) {}
 }
 
-// Race multiple proxies - use fastest response
 async function fetchWithRace(url, timeoutMs = 12000) {
     const proxies = [
         `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
@@ -69,14 +66,11 @@ async function fetchWithRace(url, timeoutMs = 12000) {
     try {
         const response = await Promise.any(
             proxies.map(async (proxyUrl) => {
-                const res = await fetch(proxyUrl, { 
-                    signal: controller.signal,
-                    headers: { 'Accept': 'application/json' }
-                });
+                const res = await fetch(proxyUrl, { signal: controller.signal });
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const text = await res.text();
                 if (!text.trim().startsWith('{') && !text.trim().startsWith('[') && !text.trim().startsWith('Date,')) {
-                    throw new Error('Not valid data');
+                    throw new Error('Invalid');
                 }
                 return text;
             })
@@ -96,12 +90,10 @@ async function fetchYahoo(ticker) {
 
     const p2 = Math.floor(Date.now() / 1000);
     const p1 = p2 - Math.floor(25 * 365.25 * 24 * 60 * 60);
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?period1=${p1}&period2=${p2}&interval=1wk&includeAdjustedClose=true`;
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?period1=${p1}&period2=${p2}&interval=1wk`;
 
     const text = await fetchWithRace(url);
     const data = JSON.parse(text);
-
-    if (data?.chart?.error) throw new Error(data.chart.error.description);
     
     const result = data?.chart?.result?.[0];
     if (!result) throw new Error('No data');
@@ -116,8 +108,6 @@ async function fetchYahoo(ticker) {
         }
     }
 
-    if (prices.length < 50) throw new Error('Insufficient data');
-
     _cache.set(cacheKey, { ts: Date.now(), data: prices });
     saveCache();
     return prices;
@@ -128,29 +118,22 @@ async function fetchStooq(ticker) {
     const hit = _cache.get(cacheKey);
     if (hit && Date.now() - hit.ts < CACHE_TTL_MS) return hit.data;
 
-    const sym = ticker.includes('.') ? ticker.toLowerCase() : `${ticker.toLowerCase()}.us`;
-    const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(sym)}&i=w`;
-
+    const sym = `${ticker.toLowerCase()}.us`;
+    const url = `https://stooq.com/q/d/l/?s=${sym}&i=w`;
     const text = await fetchWithRace(url, 15000);
     
-    if (!text.startsWith('Date,')) throw new Error('Invalid CSV');
+    if (!text.startsWith('Date,')) throw new Error('Invalid');
 
     const lines = text.split(/\r?\n/);
-    const header = lines.shift().split(',');
-    const iDate = header.indexOf('Date');
-    const iClose = header.indexOf('Close');
-
+    lines.shift();
+    
     const prices = [];
     for (const line of lines) {
         const cols = line.split(',');
-        const close = Number(cols[iClose]);
-        if (cols[iDate] && Number.isFinite(close) && close > 0) {
-            prices.push({ date: new Date(cols[iDate]), close });
-        }
+        const close = Number(cols[4]);
+        if (cols[0] && close > 0) prices.push({ date: new Date(cols[0]), close });
     }
     prices.sort((a, b) => a.date - b.date);
-
-    if (prices.length < 50) throw new Error('Insufficient data');
 
     _cache.set(cacheKey, { ts: Date.now(), data: prices });
     saveCache();
@@ -158,485 +141,201 @@ async function fetchStooq(ticker) {
 }
 
 async function fetchPrices(ticker) {
-    const yahooKey = `y:${ticker}`;
-    const stooqKey = `s:${ticker}`;
+    const yKey = `y:${ticker}`, sKey = `s:${ticker}`;
+    if (_cache.has(yKey) && Date.now() - _cache.get(yKey).ts < CACHE_TTL_MS) return _cache.get(yKey).data;
+    if (_cache.has(sKey) && Date.now() - _cache.get(sKey).ts < CACHE_TTL_MS) return _cache.get(sKey).data;
+    try { return await fetchYahoo(ticker); } catch { return await fetchStooq(ticker); }
+}
+
+function calculateZScoreData(sectorPrices) {
+    const retYears = parseInt(document.getElementById('returnPeriod').value);
+    const zYears = parseInt(document.getElementById('zscoreWindow').value);
+    const retWeeks = Math.round(retYears * 52);
+    const zWeeks = Math.round(zYears * 52);
     
-    if (_cache.has(yahooKey) && Date.now() - _cache.get(yahooKey).ts < CACHE_TTL_MS) {
-        return _cache.get(yahooKey).data;
-    }
-    if (_cache.has(stooqKey) && Date.now() - _cache.get(stooqKey).ts < CACHE_TTL_MS) {
-        return _cache.get(stooqKey).data;
-    }
-
-    try {
-        return await fetchYahoo(ticker);
-    } catch (e) {
-        console.log(`Yahoo failed for ${ticker}, trying Stooq...`);
-        return await fetchStooq(ticker);
-    }
-}
-
-function generateColor() {
-    return `hsl(${Math.random() * 360}, 70%, 60%)`;
-}
-
-function calculateRollingReturn(prices, weeks) {
-    const returns = [];
-    for (let i = weeks; i < prices.length; i++) {
-        const prev = prices[i - weeks]?.close;
-        const cur = prices[i]?.close;
-        if (prev && cur) {
-            returns.push({ date: prices[i].date, value: ((cur / prev) - 1) * 100 });
-        }
-    }
-    return returns;
-}
-
-function calculateRelativeReturns(sectorReturns, benchReturns) {
-    const benchMap = new Map();
-    benchReturns.forEach(r => {
-        benchMap.set(`${r.date.getFullYear()}-${r.date.getMonth()}-${r.date.getDate()}`, r.value);
-    });
-    
-    return sectorReturns.map(r => {
-        const key = `${r.date.getFullYear()}-${r.date.getMonth()}-${r.date.getDate()}`;
-        let benchVal = benchMap.get(key);
-        if (benchVal === undefined) {
-            for (let o = 1; o <= 7 && benchVal === undefined; o++) {
-                const d = new Date(r.date);
-                d.setDate(d.getDate() - o);
-                benchVal = benchMap.get(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
+    const calcRet = (prices, weeks) => {
+        const r = [];
+        for (let i = weeks; i < prices.length; i++) {
+            if (prices[i-weeks]?.close && prices[i]?.close) {
+                r.push({ date: prices[i].date, value: ((prices[i].close / prices[i-weeks].close) - 1) * 100 });
             }
         }
-        return benchVal !== undefined ? { date: r.date, value: r.value - benchVal } : null;
-    }).filter(Boolean);
-}
-
-function calculateZScore(returns, windowWeeks) {
-    const zscores = [];
-    const minWindow = Math.min(windowWeeks, Math.floor(returns.length * 0.3));
+        return r;
+    };
     
-    for (let i = minWindow; i < returns.length; i++) {
-        const window = returns.slice(Math.max(0, i - windowWeeks), i).map(r => r.value);
-        if (window.length < 20) continue;
-        
-        const mean = window.reduce((a, b) => a + b, 0) / window.length;
-        const std = Math.sqrt(window.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / window.length);
-        
-        if (std > 0.5) {
-            zscores.push({
-                date: returns[i].date,
-                value: Math.max(-6, Math.min(6, (returns[i].value - mean) / std))
-            });
+    const sectorRet = calcRet(sectorPrices, retWeeks);
+    const benchRet = calcRet(benchmarkPrices, retWeeks);
+    
+    const benchMap = new Map();
+    benchRet.forEach(r => benchMap.set(`${r.date.getFullYear()}-${r.date.getMonth()}-${r.date.getDate()}`, r.value));
+    
+    const relRet = sectorRet.map(r => {
+        const k = `${r.date.getFullYear()}-${r.date.getMonth()}-${r.date.getDate()}`;
+        let bv = benchMap.get(k);
+        if (bv === undefined) {
+            for (let o = 1; o <= 7 && bv === undefined; o++) {
+                const d = new Date(r.date); d.setDate(d.getDate() - o);
+                bv = benchMap.get(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
+            }
         }
+        return bv !== undefined ? { date: r.date, value: r.value - bv } : null;
+    }).filter(Boolean);
+    
+    const zscores = [];
+    const minW = Math.min(zWeeks, Math.floor(relRet.length * 0.3));
+    for (let i = minW; i < relRet.length; i++) {
+        const win = relRet.slice(Math.max(0, i - zWeeks), i).map(r => r.value);
+        if (win.length < 20) continue;
+        const mean = win.reduce((a, b) => a + b, 0) / win.length;
+        const std = Math.sqrt(win.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / win.length);
+        if (std > 0.5) zscores.push({ date: relRet[i].date, value: Math.max(-6, Math.min(6, (relRet[i].value - mean) / std)) });
     }
-    return zscores;
-}
-
-function resampleMonthly(data) {
+    
     const monthly = new Map();
-    data.forEach(d => {
-        const key = `${d.date.getFullYear()}-${String(d.date.getMonth() + 1).padStart(2, '0')}`;
-        monthly.set(key, d);
-    });
+    zscores.forEach(d => monthly.set(`${d.date.getFullYear()}-${String(d.date.getMonth()+1).padStart(2,'0')}`, d));
     return Array.from(monthly.values()).sort((a, b) => a.date - b.date);
 }
 
-function calculateSectorZScore(sectorPrices) {
-    const returnYears = parseInt(document.getElementById('returnPeriod').value);
-    const zscoreYears = parseInt(document.getElementById('zscoreWindow').value);
-    
-    const returnWeeks = Math.round(returnYears * 52);
-    const zscoreWeeks = Math.round(zscoreYears * 52);
-    
-    const sectorReturns = calculateRollingReturn(sectorPrices, returnWeeks);
-    const benchReturns = calculateRollingReturn(benchmarkPrices, returnWeeks);
-    const relativeReturns = calculateRelativeReturns(sectorReturns, benchReturns);
-    const zscores = calculateZScore(relativeReturns, zscoreWeeks);
-    
-    return resampleMonthly(zscores);
+function normalizePrices(prices) {
+    if (!prices?.length) return [];
+    const start = prices[0].close;
+    return prices.map(p => ({ date: p.date, value: ((p.close / start) - 1) * 100 }));
 }
 
-function initSectorTags() {
-    const container = document.getElementById('sectorTags');
-    container.innerHTML = '';
-    
-    AVAILABLE_SECTORS.forEach(sector => {
-        const isActive = activeSectors.some(s => s.ticker === sector.ticker);
-        const tag = document.createElement('div');
-        tag.className = `sector-tag ${isActive ? 'active' : ''}`;
-        tag.style.setProperty('--sector-color', sector.color);
-        tag.innerHTML = `<div class="dot" style="background: ${sector.color}"></div><span>${sector.ticker}</span>`;
-        tag.onclick = () => toggleSector(sector);
-        container.appendChild(tag);
+function setStatus(status, text) {
+    document.getElementById('statusDot').className = 'status-dot' + (status === 'loading' ? ' loading' : status === 'error' ? ' error' : '');
+    document.getElementById('statusText').textContent = text;
+}
+
+function selectSector(ticker) {
+    selectedSector = ticker;
+    renderSectorList();
+    renderChart();
+    localStorage.setItem('selectedSector', ticker);
+}
+
+function renderSectorList() {
+    const sorted = [...SECTORS].sort((a, b) => {
+        const aZ = sectorZScores[a.ticker]?.slice(-1)[0]?.value ?? 999;
+        const bZ = sectorZScores[b.ticker]?.slice(-1)[0]?.value ?? 999;
+        return aZ - bZ;
     });
     
-    activeSectors.filter(s => s.custom).forEach(sector => {
-        const tag = document.createElement('div');
-        tag.className = 'sector-tag active';
-        tag.style.setProperty('--sector-color', sector.color);
-        tag.innerHTML = `
-            <div class="dot" style="background: ${sector.color}"></div>
-            <span>${sector.ticker}</span>
-            <span class="remove" onclick="event.stopPropagation(); removeCustomSector('${sector.ticker}')">×</span>
-        `;
-        container.appendChild(tag);
+    document.getElementById('sectorList').innerHTML = sorted.map(s => {
+        const z = sectorZScores[s.ticker]?.slice(-1)[0]?.value;
+        const sel = selectedSector === s.ticker;
+        const sig = z === undefined ? '' : z < -2 ? 'cyclical-low' : z < -1 ? 'cheap' : z > 2 ? 'extended' : 'neutral';
+        const sigTxt = z === undefined ? '' : z < -2 ? 'CYCLICAL LOW' : z < -1 ? 'CHEAP' : z > 2 ? 'EXTENDED' : 'NEUTRAL';
+        const valCls = z === undefined ? '' : z < -1 ? 'negative' : z > 1 ? 'positive' : 'neutral';
+        const valStr = z !== undefined ? `${z >= 0 ? '+' : ''}${z.toFixed(2)}` : '...';
+        
+        return `<div class="sector-row ${sel ? 'selected' : ''}" onclick="selectSector('${s.ticker}')">
+            <div class="sector-info"><span class="dot" style="background:${s.color}"></span><span class="ticker">${s.ticker}</span><span class="name">${s.name}</span></div>
+            <div class="sector-data"><span class="zscore ${valCls}">${valStr}</span>${sig ? `<span class="signal ${sig}">${sigTxt}</span>` : ''}</div>
+        </div>`;
+    }).join('');
+}
+
+function renderChart() {
+    const container = document.getElementById('chartContainer');
+    if (!selectedSector) { container.innerHTML = '<div class="empty">Select a sector</div>'; return; }
+    
+    const s = SECTORS.find(x => x.ticker === selectedSector) || { ticker: selectedSector, name: selectedSector, color: '#888' };
+    const z = sectorZScores[selectedSector]?.slice(-1)[0]?.value;
+    const valCls = z === undefined ? '' : z < -1 ? 'negative' : z > 1 ? 'positive' : 'neutral';
+    const valStr = z !== undefined ? `${z >= 0 ? '+' : ''}${z.toFixed(2)}` : '...';
+    const bench = document.getElementById('benchmark').value;
+    
+    container.innerHTML = `
+        <div class="chart-head">
+            <div class="title" style="color:${s.color}">${s.name} <span class="tk">${s.ticker}</span></div>
+            <div class="zscore-display"><span class="label">Z-Score:</span><span class="val ${valCls}">${valStr}</span></div>
+        </div>
+        <div class="legend"><span><i style="background:${s.color}"></i>${s.ticker}</span><span><i style="background:rgba(255,255,255,0.5)"></i>${bench}</span></div>
+        <div class="chart-wrap"><canvas id="mainChart"></canvas></div>
+        <div class="chart-note">Normalized price (% from start)</div>
+    `;
+    
+    createChart(selectedSector, s.color, bench);
+}
+
+function createChart(ticker, color, bench) {
+    const canvas = document.getElementById('mainChart');
+    if (!canvas) return;
+    if (chart) chart.destroy();
+    
+    const sCache = _cache.get(`y:${ticker}`) || _cache.get(`s:${ticker}`);
+    const bCache = _cache.get(`y:${bench}`) || _cache.get(`s:${bench}`);
+    if (!sCache?.data || !bCache?.data) return;
+    
+    const start = new Date(Math.max(sCache.data[0].date, bCache.data[0].date));
+    const sNorm = normalizePrices(sCache.data.filter(p => p.date >= start));
+    const bNorm = normalizePrices(bCache.data.filter(p => p.date >= start));
+    
+    chart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            datasets: [
+                { label: ticker, data: sNorm.map(d => ({ x: d.date, y: d.value })), borderColor: color, borderWidth: 2, pointRadius: 0, tension: 0.1 },
+                { label: bench, data: bNorm.map(d => ({ x: d.date, y: d.value })), borderColor: 'rgba(255,255,255,0.5)', borderWidth: 2, pointRadius: 0, tension: 0.1 }
+            ]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            interaction: { intersect: false, mode: 'index' },
+            plugins: { legend: { display: false }, tooltip: { callbacks: {
+                title: ctx => ctx[0].raw.x.toLocaleDateString(),
+                label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y.toFixed(1)}%`
+            }}},
+            scales: {
+                x: { type: 'time', time: { unit: 'year' }, grid: { color: '#1a1a2e' }, ticks: { color: '#555', maxTicksLimit: 10 }},
+                y: { grid: { color: '#1a1a2e' }, ticks: { color: '#555', callback: v => `${v >= 0 ? '+' : ''}${v}%` }}
+            }
+        },
+        plugins: [{ id: 'zero', beforeDraw: c => {
+            const ctx = c.ctx, y = c.scales.y, x = c.scales.x, zy = y.getPixelForValue(0);
+            if (zy >= y.top && zy <= y.bottom) { ctx.save(); ctx.strokeStyle = '#444'; ctx.beginPath(); ctx.moveTo(x.left, zy); ctx.lineTo(x.right, zy); ctx.stroke(); ctx.restore(); }
+        }}]
     });
 }
 
-async function toggleSector(sector) {
-    const idx = activeSectors.findIndex(s => s.ticker === sector.ticker);
-    if (idx >= 0) {
-        activeSectors.splice(idx, 1);
-        delete sectorData[sector.ticker];
-        if (charts[sector.ticker]) {
-            charts[sector.ticker].destroy();
-            delete charts[sector.ticker];
-        }
-        initSectorTags();
-        renderCharts();
-        updateReadings();
-        saveState();
-    } else {
-        activeSectors.push(sector);
-        initSectorTags();
-        renderCharts();
-        
-        try {
-            setStatus('loading', `Loading ${sector.ticker}...`);
-            const prices = await fetchPrices(sector.ticker);
-            sectorData[sector.ticker] = calculateSectorZScore(prices);
-            setStatus('ready', 'Ready');
-        } catch (e) {
-            sectorData[sector.ticker] = [];
-            setStatus('error', `Failed: ${sector.ticker}`);
-            setTimeout(() => setStatus('ready', 'Ready'), 2000);
-        }
-        
-        renderCharts();
-        updateReadings();
-        saveState();
-    }
-}
-
-function addCustomTicker() {
-    const tickerInput = document.getElementById('customTicker');
-    const nameInput = document.getElementById('customName');
-    
-    const ticker = tickerInput.value.toUpperCase().trim();
-    if (!ticker) return;
-    
-    if (activeSectors.some(s => s.ticker === ticker)) {
-        tickerInput.value = '';
-        nameInput.value = '';
-        return;
-    }
-    
-    const existing = AVAILABLE_SECTORS.find(s => s.ticker === ticker);
-    if (existing) {
-        toggleSector(existing);
-    } else {
-        const newSector = { ticker, name: nameInput.value.trim() || ticker, color: generateColor(), custom: true };
-        toggleSector(newSector);
-    }
-    
-    tickerInput.value = '';
-    nameInput.value = '';
-}
-
-function removeCustomSector(ticker) {
-    const sector = activeSectors.find(s => s.ticker === ticker);
-    if (sector) toggleSector(sector);
-}
-
-// PARALLEL loading - much faster!
 async function refreshAllData() {
     if (isLoading) return;
     isLoading = true;
     
-    const startTime = Date.now();
+    const bench = document.getElementById('benchmark').value;
+    setStatus('loading', `Loading ${bench}...`);
     
     try {
-        const benchmark = document.getElementById('benchmark').value;
-        setStatus('loading', `Loading ${benchmark}...`);
+        benchmarkPrices = await fetchPrices(bench);
+        setStatus('loading', 'Loading sectors...');
         
-        benchmarkPrices = await fetchPrices(benchmark);
+        const results = await Promise.allSettled(SECTORS.map(async s => {
+            const prices = await fetchPrices(s.ticker);
+            return { ticker: s.ticker, data: calculateZScoreData(prices) };
+        }));
         
-        setStatus('loading', `Loading ${activeSectors.length} sectors...`);
-        
-        // Load ALL sectors in parallel!
-        const results = await Promise.allSettled(
-            activeSectors.map(async (sector) => {
-                const prices = await fetchPrices(sector.ticker);
-                return { ticker: sector.ticker, data: calculateSectorZScore(prices) };
-            })
-        );
-        
-        results.forEach((result, i) => {
-            if (result.status === 'fulfilled') {
-                sectorData[result.value.ticker] = result.value.data;
-            } else {
-                sectorData[activeSectors[i].ticker] = [];
-                console.error(`Failed: ${activeSectors[i].ticker}`, result.reason);
-            }
+        results.forEach((r, i) => {
+            sectorZScores[SECTORS[i].ticker] = r.status === 'fulfilled' ? r.value.data : [];
         });
         
-        renderCharts();
-        updateReadings();
+        if (!selectedSector) {
+            const best = [...SECTORS].sort((a, b) => (sectorZScores[a.ticker]?.slice(-1)[0]?.value ?? 999) - (sectorZScores[b.ticker]?.slice(-1)[0]?.value ?? 999))[0];
+            selectedSector = localStorage.getItem('selectedSector') || best?.ticker || SECTORS[0].ticker;
+        }
         
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-        document.getElementById('lastUpdated').textContent = `Loaded in ${elapsed}s`;
+        renderSectorList();
+        renderChart();
         setStatus('ready', 'Ready');
-        
-    } catch (err) {
-        console.error('Refresh error:', err);
-        setStatus('error', err.message);
-    }
-    
-    isLoading = false;
-}
-
-function setStatus(status, text) {
-    const dot = document.getElementById('statusDot');
-    const textEl = document.getElementById('statusText');
-    dot.className = 'status-dot' + (status === 'loading' ? ' loading' : status === 'error' ? ' error' : '');
-    textEl.textContent = text;
-}
-
-function renderCharts() {
-    const container = document.getElementById('chartsContainer');
-    
-    if (activeSectors.length === 0) {
-        container.innerHTML = `<div class="no-charts"><p>No sectors selected</p><p style="font-size: 0.8rem;">Click sectors above to add them</p></div>`;
-        return;
-    }
-    
-    let html = '';
-    activeSectors.forEach(sector => {
-        const data = sectorData[sector.ticker];
-        const current = data?.[data.length - 1]?.value;
-        const valueClass = current === undefined ? '' : current < -1 ? 'negative' : current > 1 ? 'positive' : 'neutral';
-        const valueStr = current !== undefined ? `${current >= 0 ? '+' : ''}${current.toFixed(2)}` : '...';
-        const hasError = data && data.length === 0;
-        
-        html += `
-            <div class="chart-panel" id="panel-${sector.ticker}">
-                <div class="chart-header">
-                    <h3 style="color: ${sector.color}">${sector.name} <span class="ticker">${sector.ticker}</span></h3>
-                    <span class="current-value ${valueClass}">${valueStr}</span>
-                </div>
-                <div class="chart-wrapper">
-                    ${hasError ? `<div class="error">Failed to load</div>` :
-                      data && data.length > 0 ? `<canvas id="chart-${sector.ticker}"></canvas>` :
-                      `<div class="loading">Loading...</div>`}
-                </div>
-            </div>
-        `;
-    });
-    
-    container.innerHTML = html;
-    
-    activeSectors.forEach(sector => {
-        const data = sectorData[sector.ticker];
-        if (data && data.length > 0) {
-            createChart(sector.ticker, data, sector.color);
-        }
-    });
-}
-
-// Calculate yearly performance vs benchmark
-function createChart(ticker, data, color) {
-    const canvas = document.getElementById(`chart-${ticker}`);
-    if (!canvas) return;
-    
-    if (charts[ticker]) charts[ticker].destroy();
-    
-    // Calculate cumulative relative return vs benchmark (normalized to fit Y-axis)
-    const cumulativeData = calculateCumulativeRelativeReturn(ticker, data);
-    
-    charts[ticker] = new Chart(canvas.getContext('2d'), {
-        type: 'line',
-        data: {
-            datasets: [
-                {
-                    label: ticker,
-                    data: data.map(d => ({ x: d.date, y: d.value })),
-                    borderColor: color,
-                    backgroundColor: 'transparent',
-                    borderWidth: 2,
-                    pointRadius: 0,
-                    tension: 0.1,
-                    order: 1
-                },
-                {
-                    label: 'Cumulative vs SPY',
-                    data: cumulativeData,
-                    borderColor: 'rgba(255, 255, 255, 0.4)',
-                    backgroundColor: 'transparent',
-                    borderWidth: 1.5,
-                    pointRadius: 0,
-                    tension: 0.1,
-                    borderDash: [5, 5],
-                    order: 2
-                }
-            ]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            animation: false,
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    callbacks: {
-                        title: ctx => ctx[0].raw.x.toLocaleDateString(),
-                        label: ctx => {
-                            if (ctx.datasetIndex === 0) {
-                                return `Z-Score: ${ctx.parsed.y.toFixed(2)}`;
-                            } else {
-                                return `Cumulative Alpha: ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y.toFixed(1)}%`;
-                            }
-                        }
-                    }
-                }
-            },
-            scales: {
-                x: {
-                    type: 'time',
-                    time: { unit: 'year', displayFormats: { year: 'yyyy' } },
-                    grid: { color: '#1a1a2e' },
-                    ticks: { color: '#555', maxTicksLimit: 8 }
-                },
-                y: {
-                    min: -6, max: 6,
-                    grid: { color: '#1a1a2e' },
-                    ticks: { color: '#555' }
-                }
-            }
-        },
-        plugins: [{
-            id: 'refLines',
-            beforeDraw: chart => {
-                const ctx = chart.ctx, y = chart.scales.y, x = chart.scales.x;
-                ctx.save();
-                ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
-                ctx.beginPath(); ctx.moveTo(x.left, y.getPixelForValue(0)); ctx.lineTo(x.right, y.getPixelForValue(0)); ctx.stroke();
-                ctx.setLineDash([4, 4]);
-                ctx.strokeStyle = '#ef4444';
-                ctx.beginPath(); ctx.moveTo(x.left, y.getPixelForValue(-2)); ctx.lineTo(x.right, y.getPixelForValue(-2)); ctx.stroke();
-                ctx.strokeStyle = '#22c55e';
-                ctx.beginPath(); ctx.moveTo(x.left, y.getPixelForValue(2)); ctx.lineTo(x.right, y.getPixelForValue(2)); ctx.stroke();
-                ctx.restore();
-            }
-        }]
-    });
-}
-
-// Calculate cumulative relative return, scaled to fit on Z-score axis
-function calculateCumulativeRelativeReturn(ticker, zscoreData) {
-    const yahooKey = `y:${ticker}`;
-    const stooqKey = `s:${ticker}`;
-    const benchTicker = document.getElementById('benchmark').value;
-    const benchYahooKey = `y:${benchTicker}`;
-    const benchStooqKey = `s:${benchTicker}`;
-    
-    const sectorCache = _cache.get(yahooKey) || _cache.get(stooqKey);
-    const benchCache = _cache.get(benchYahooKey) || _cache.get(benchStooqKey);
-    
-    if (!sectorCache?.data || !benchCache?.data) return [];
-    
-    const sectorPrices = sectorCache.data;
-    const benchPrices = benchCache.data;
-    
-    // Build date map for benchmark
-    const benchMap = new Map();
-    benchPrices.forEach(p => {
-        const key = `${p.date.getFullYear()}-${p.date.getMonth()}-${p.date.getDate()}`;
-        benchMap.set(key, p.close);
-    });
-    
-    // Calculate cumulative relative return
-    const result = [];
-    let cumulative = 0;
-    let prevSector = null;
-    let prevBench = null;
-    
-    for (const sp of sectorPrices) {
-        const key = `${sp.date.getFullYear()}-${sp.date.getMonth()}-${sp.date.getDate()}`;
-        const bp = benchMap.get(key);
-        
-        if (bp && prevSector && prevBench) {
-            const sectorRet = (sp.close / prevSector - 1) * 100;
-            const benchRet = (bp / prevBench - 1) * 100;
-            cumulative += (sectorRet - benchRet);
-        }
-        
-        if (bp) {
-            // Scale cumulative to fit in -6 to 6 range (divide by 50 so ±300% maps to ±6)
-            result.push({ x: sp.date, y: cumulative / 50 });
-            prevSector = sp.close;
-            prevBench = bp;
-        }
-    }
-    
-    return result;
-}
-
-function updateReadings() {
-    const container = document.getElementById('currentReadings');
-    
-    if (activeSectors.length === 0) {
-        container.innerHTML = `<div style="color: #666; font-size: 0.85rem; text-align: center; padding: 20px;">Select sectors</div>`;
-        return;
-    }
-    
-    const sorted = [...activeSectors].sort((a, b) => {
-        const aVal = sectorData[a.ticker]?.slice(-1)[0]?.value ?? 999;
-        const bVal = sectorData[b.ticker]?.slice(-1)[0]?.value ?? 999;
-        return aVal - bVal;
-    });
-    
-    container.innerHTML = sorted.map(sector => {
-        const current = sectorData[sector.ticker]?.slice(-1)[0]?.value;
-        if (current === undefined) {
-            return `<div class="sector-row"><div class="sector-name"><div class="sector-dot" style="background: ${sector.color}"></div><span>${sector.ticker}</span></div><div class="sector-values"><div class="zscore-value neutral">...</div></div></div>`;
-        }
-        
-        const [signal, signalClass] = current < -2 ? ['CYCLICAL LOW', 'cyclical-low'] : 
-            current < -1 ? ['CHEAP', 'cheap'] : current > 2 ? ['EXTENDED', 'extended'] : ['NEUTRAL', 'neutral'];
-        const valueClass = current < -1 ? 'negative' : current > 1 ? 'positive' : 'neutral';
-        
-        return `<div class="sector-row"><div class="sector-name"><div class="sector-dot" style="background: ${sector.color}"></div><span>${sector.ticker}</span></div><div class="sector-values"><div class="zscore-value ${valueClass}">${current >= 0 ? '+' : ''}${current.toFixed(2)}</div><div class="signal-badge ${signalClass}">${signal}</div></div></div>`;
-    }).join('');
-}
-
-function saveState() {
-    try {
-        localStorage.setItem('sectorZScoreState', JSON.stringify({
-            activeSectors: activeSectors.map(s => ({ ticker: s.ticker, name: s.name, color: s.color, custom: s.custom }))
-        }));
-    } catch (e) {}
-}
-
-function loadState() {
-    try {
-        const saved = localStorage.getItem('sectorZScoreState');
-        if (saved) {
-            activeSectors = JSON.parse(saved).activeSectors || [];
-        } else {
-            activeSectors = ['XLB', 'XLE', 'XLF'].map(t => AVAILABLE_SECTORS.find(s => s.ticker === t)).filter(Boolean);
-        }
     } catch (e) {
-        activeSectors = [];
+        setStatus('error', e.message);
     }
+    isLoading = false;
 }
 
 document.getElementById('returnPeriod').addEventListener('change', refreshAllData);
 document.getElementById('zscoreWindow').addEventListener('change', refreshAllData);
 document.getElementById('benchmark').addEventListener('change', refreshAllData);
-document.getElementById('customTicker').addEventListener('keypress', e => { if (e.key === 'Enter') addCustomTicker(); });
 
-loadState();
-initSectorTags();
-renderCharts();
+selectedSector = localStorage.getItem('selectedSector');
 refreshAllData();
