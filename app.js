@@ -419,6 +419,10 @@ function renderCharts() {
         const valueStr = current !== undefined ? `${current >= 0 ? '+' : ''}${current.toFixed(2)}` : '...';
         const hasError = data && data.length === 0;
         
+        // Calculate performance history
+        const perfHistory = calculatePerformanceHistory(sector.ticker);
+        const perfHtml = perfHistory ? renderPerformanceHistory(perfHistory) : '';
+        
         html += `
             <div class="chart-panel" id="panel-${sector.ticker}">
                 <div class="chart-header">
@@ -430,6 +434,7 @@ function renderCharts() {
                       data && data.length > 0 ? `<canvas id="chart-${sector.ticker}"></canvas>` :
                       `<div class="loading">Loading...</div>`}
                 </div>
+                ${perfHtml}
             </div>
         `;
     });
@@ -442,6 +447,137 @@ function renderCharts() {
             createChart(sector.ticker, data, sector.color);
         }
     });
+}
+
+// Calculate yearly performance vs benchmark
+function calculatePerformanceHistory(ticker) {
+    const yahooKey = `y:${ticker}`;
+    const stooqKey = `s:${ticker}`;
+    const benchTicker = document.getElementById('benchmark').value;
+    const benchYahooKey = `y:${benchTicker}`;
+    const benchStooqKey = `s:${benchTicker}`;
+    
+    const sectorCache = _cache.get(yahooKey) || _cache.get(stooqKey);
+    const benchCache = _cache.get(benchYahooKey) || _cache.get(benchStooqKey);
+    
+    if (!sectorCache?.data || !benchCache?.data) return null;
+    
+    const sectorPrices = sectorCache.data;
+    const benchPrices = benchCache.data;
+    
+    // Group by year
+    const sectorByYear = groupByYear(sectorPrices);
+    const benchByYear = groupByYear(benchPrices);
+    
+    const years = [];
+    const allYears = [...new Set([...Object.keys(sectorByYear), ...Object.keys(benchByYear)])].sort();
+    
+    for (const year of allYears) {
+        const sectorData = sectorByYear[year];
+        const benchData = benchByYear[year];
+        
+        if (!sectorData || !benchData || sectorData.length < 2 || benchData.length < 2) continue;
+        
+        const sectorReturn = ((sectorData[sectorData.length - 1].close / sectorData[0].close) - 1) * 100;
+        const benchReturn = ((benchData[benchData.length - 1].close / benchData[0].close) - 1) * 100;
+        const relativeReturn = sectorReturn - benchReturn;
+        
+        years.push({
+            year: parseInt(year),
+            sectorReturn,
+            benchReturn,
+            relativeReturn,
+            beat: relativeReturn > 0
+        });
+    }
+    
+    return years;
+}
+
+function groupByYear(prices) {
+    const byYear = {};
+    prices.forEach(p => {
+        const year = p.date.getFullYear();
+        if (!byYear[year]) byYear[year] = [];
+        byYear[year].push(p);
+    });
+    // Sort each year's prices by date
+    Object.keys(byYear).forEach(year => {
+        byYear[year].sort((a, b) => a.date - b.date);
+    });
+    return byYear;
+}
+
+function renderPerformanceHistory(perfHistory) {
+    if (!perfHistory || perfHistory.length === 0) return '';
+    
+    const beatYears = perfHistory.filter(y => y.beat);
+    const lostYears = perfHistory.filter(y => !y.beat);
+    
+    // Find streaks
+    const beatStreaks = findStreaks(perfHistory, true);
+    const lostStreaks = findStreaks(perfHistory, false);
+    
+    const benchmark = document.getElementById('benchmark').value;
+    
+    // Calculate total relative return
+    const totalRelative = perfHistory.reduce((sum, y) => sum + y.relativeReturn, 0);
+    
+    return `
+        <div class="perf-history">
+            <div class="perf-summary">
+                <div class="perf-stat beat">
+                    <span class="perf-label">Beat ${benchmark}</span>
+                    <span class="perf-value">${beatYears.length} yrs</span>
+                </div>
+                <div class="perf-stat lost">
+                    <span class="perf-label">Lost to ${benchmark}</span>
+                    <span class="perf-value">${lostYears.length} yrs</span>
+                </div>
+                <div class="perf-stat ${totalRelative >= 0 ? 'beat' : 'lost'}">
+                    <span class="perf-label">Total Alpha</span>
+                    <span class="perf-value">${totalRelative >= 0 ? '+' : ''}${totalRelative.toFixed(1)}%</span>
+                </div>
+            </div>
+            <div class="perf-years">
+                ${perfHistory.slice(-20).map(y => `
+                    <div class="perf-year ${y.beat ? 'beat' : 'lost'}" title="${y.year}: ${y.relativeReturn >= 0 ? '+' : ''}${y.relativeReturn.toFixed(1)}% vs ${benchmark}">
+                        <span class="year-label">${String(y.year).slice(2)}</span>
+                        <span class="year-bar" style="height: ${Math.min(100, Math.abs(y.relativeReturn) * 2)}%; background: ${y.beat ? '#22c55e' : '#ef4444'}"></span>
+                    </div>
+                `).join('')}
+            </div>
+            <div class="perf-streaks">
+                ${beatStreaks.length > 0 ? `<span class="streak beat">Best run: ${beatStreaks[0].start}-${beatStreaks[0].end} (${beatStreaks[0].length}yr)</span>` : ''}
+                ${lostStreaks.length > 0 ? `<span class="streak lost">Worst run: ${lostStreaks[0].start}-${lostStreaks[0].end} (${lostStreaks[0].length}yr)</span>` : ''}
+            </div>
+        </div>
+    `;
+}
+
+function findStreaks(perfHistory, beatOrLost) {
+    const streaks = [];
+    let currentStreak = null;
+    
+    for (const year of perfHistory) {
+        if (year.beat === beatOrLost) {
+            if (!currentStreak) {
+                currentStreak = { start: year.year, end: year.year, length: 1 };
+            } else {
+                currentStreak.end = year.year;
+                currentStreak.length++;
+            }
+        } else {
+            if (currentStreak) {
+                streaks.push(currentStreak);
+                currentStreak = null;
+            }
+        }
+    }
+    if (currentStreak) streaks.push(currentStreak);
+    
+    // Sort by length descending
+    return streaks.sort((a, b) => b.length - a.length);
 }
 
 function createChart(ticker, data, color) {
