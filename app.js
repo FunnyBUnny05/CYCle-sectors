@@ -26,7 +26,6 @@ const SECTORS = [
 let selectedSector = null;
 let sectorZScores = {};
 let benchmarkPrices = null;
-let chart = null;
 let isLoading = false;
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -251,18 +250,82 @@ function renderChart() {
             <div class="title" style="color:${s.color}">${s.name} <span class="tk">${s.ticker}</span></div>
             <div class="zscore-display"><span class="label">Z-Score:</span><span class="val ${valCls}">${valStr}</span></div>
         </div>
-        <div class="legend"><span><i style="background:${s.color}"></i>${s.ticker}</span><span><i style="background:rgba(255,255,255,0.5)"></i>${bench}</span></div>
-        <div class="chart-wrap"><canvas id="mainChart"></canvas></div>
-        <div class="chart-note">Normalized price (% from start)</div>
+        
+        <div class="chart-section">
+            <div class="chart-label">Cyclical Z-Score (vs ${bench})</div>
+            <div class="chart-wrap zscore-chart"><canvas id="zscoreChart"></canvas></div>
+        </div>
+        
+        <div class="chart-section">
+            <div class="chart-label">Price Performance</div>
+            <div class="legend"><span><i style="background:${s.color}"></i>${s.ticker}</span><span><i style="background:rgba(255,255,255,0.5)"></i>${bench}</span></div>
+            <div class="chart-wrap price-chart"><canvas id="priceChart"></canvas></div>
+        </div>
     `;
     
-    createChart(selectedSector, s.color, bench);
+    createZScoreChart(selectedSector, s.color);
+    createPriceChart(selectedSector, s.color, bench);
 }
 
-function createChart(ticker, color, bench) {
-    const canvas = document.getElementById('mainChart');
+let zscoreChartInstance = null;
+let priceChartInstance = null;
+
+function createZScoreChart(ticker, color) {
+    const canvas = document.getElementById('zscoreChart');
     if (!canvas) return;
-    if (chart) chart.destroy();
+    if (zscoreChartInstance) zscoreChartInstance.destroy();
+    
+    const zData = sectorZScores[ticker];
+    if (!zData?.length) return;
+    
+    zscoreChartInstance = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            datasets: [{
+                label: 'Z-Score',
+                data: zData.map(d => ({ x: d.date, y: d.value })),
+                borderColor: color,
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.1,
+                fill: false
+            }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            plugins: { legend: { display: false }, tooltip: { callbacks: {
+                title: ctx => ctx[0].raw.x.toLocaleDateString(),
+                label: ctx => `Z-Score: ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y.toFixed(2)}`
+            }}},
+            scales: {
+                x: { type: 'time', time: { unit: 'year' }, grid: { color: '#1a1a2e' }, ticks: { color: '#555', maxTicksLimit: 10 }},
+                y: { min: -6, max: 6, grid: { color: '#1a1a2e' }, ticks: { color: '#555' }}
+            }
+        },
+        plugins: [{
+            id: 'refLines',
+            beforeDraw: c => {
+                const ctx = c.ctx, y = c.scales.y, x = c.scales.x;
+                ctx.save();
+                // Zero line
+                ctx.strokeStyle = '#444'; ctx.lineWidth = 1;
+                ctx.beginPath(); ctx.moveTo(x.left, y.getPixelForValue(0)); ctx.lineTo(x.right, y.getPixelForValue(0)); ctx.stroke();
+                // Reference lines
+                ctx.setLineDash([5, 5]);
+                ctx.strokeStyle = '#ef4444'; // -2 line (cyclical low)
+                ctx.beginPath(); ctx.moveTo(x.left, y.getPixelForValue(-2)); ctx.lineTo(x.right, y.getPixelForValue(-2)); ctx.stroke();
+                ctx.strokeStyle = '#22c55e'; // +2 line (extended)
+                ctx.beginPath(); ctx.moveTo(x.left, y.getPixelForValue(2)); ctx.lineTo(x.right, y.getPixelForValue(2)); ctx.stroke();
+                ctx.restore();
+            }
+        }]
+    });
+}
+
+function createPriceChart(ticker, color, bench) {
+    const canvas = document.getElementById('priceChart');
+    if (!canvas) return;
+    if (priceChartInstance) priceChartInstance.destroy();
     
     const sCache = _cache.get(`y:${ticker}`) || _cache.get(`s:${ticker}`);
     const bCache = _cache.get(`y:${bench}`) || _cache.get(`s:${bench}`);
@@ -272,7 +335,7 @@ function createChart(ticker, color, bench) {
     const sNorm = normalizePrices(sCache.data.filter(p => p.date >= start));
     const bNorm = normalizePrices(bCache.data.filter(p => p.date >= start));
     
-    chart = new Chart(canvas.getContext('2d'), {
+    priceChartInstance = new Chart(canvas.getContext('2d'), {
         type: 'line',
         data: {
             datasets: [
