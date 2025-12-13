@@ -4,6 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sector Z-Score Dashboard</title>
+    
+    <!-- Favicon for browser tab -->
+    <link rel="icon" type="image/png" href="logo.png">
+    
+    <!-- Apple Touch Icon for iPhone home screen -->
+    <link rel="apple-touch-icon" href="logo.png">
+    
+    <!-- PWA meta tags for better home screen experience -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Sector Z-Score">
+    <meta name="theme-color" content="#0a0a0f">
+    
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
     <style>
@@ -16,8 +29,6 @@
             padding: 12px 20px; border-bottom: 1px solid #1a1a2e;
             display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
         }
-        .header-left { display: flex; align-items: center; gap: 12px; }
-        .logo { height: 36px; width: auto; }
         .header h1 { font-size: 1.1rem; color: #fff; }
         .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
         .controls label { color: #666; font-size: 0.75rem; }
@@ -104,10 +115,7 @@
 </head>
 <body>
     <div class="header">
-        <div class="header-left">
-            <img src="logo.png" alt="Logo" class="logo">
-            <h1>Sector Z-Score Dashboard</h1>
-        </div>
+        <h1>Sector Z-Score Dashboard</h1>
         <div class="controls">
             <label>Return:</label>
             <select id="returnPeriod">
