@@ -13,9 +13,11 @@
             background: #0a0a0f; color: #e0e0e0; min-height: 100vh;
         }
         .header {
-            padding: 15px 20px; border-bottom: 1px solid #1a1a2e;
+            padding: 12px 20px; border-bottom: 1px solid #1a1a2e;
             display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
         }
+        .header-left { display: flex; align-items: center; gap: 12px; }
+        .logo { height: 36px; width: auto; }
         .header h1 { font-size: 1.1rem; color: #fff; }
         .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
         .controls label { color: #666; font-size: 0.75rem; }
@@ -102,7 +104,10 @@
 </head>
 <body>
     <div class="header">
-        <h1>Sector Z-Score Dashboard</h1>
+        <div class="header-left">
+            <img src="logo.png" alt="Logo" class="logo">
+            <h1>Sector Z-Score Dashboard</h1>
+        </div>
         <div class="controls">
             <label>Return:</label>
             <select id="returnPeriod">
