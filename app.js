@@ -95,7 +95,7 @@ async function fetchYahoo(ticker) {
     if (hit && Date.now() - hit.ts < CACHE_TTL_MS) return hit.data;
 
     const p2 = Math.floor(Date.now() / 1000);
-    const p1 = p2 - Math.floor(15 * 365.25 * 24 * 60 * 60);
+    const p1 = p2 - Math.floor(25 * 365.25 * 24 * 60 * 60);
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?period1=${p1}&period2=${p2}&interval=1wk&includeAdjustedClose=true`;
 
     const text = await fetchWithRace(url);
