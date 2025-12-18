@@ -1,6 +1,133 @@
 // Sector Z-Score Dashboard v4 - Simplified
 // Single sector view with S&P 500 comparison
 
+// Crosshair plugin for smooth hover effect
+const crosshairPlugin = {
+    id: 'crosshair',
+
+    // State for smooth animation
+    state: {
+        currentX: null,
+        currentY: null,
+        targetX: null,
+        targetY: null,
+        visible: false,
+        animationFrame: null
+    },
+
+    afterInit(chart) {
+        // Initialize state for each chart instance
+        chart.crosshair = {
+            x: null,
+            y: null,
+            targetX: null,
+            targetY: null,
+            visible: false
+        };
+    },
+
+    afterEvent(chart, args) {
+        const { event } = args;
+        const { chartArea } = chart;
+
+        if (!chartArea) return;
+
+        if (event.type === 'mousemove') {
+            const x = event.x;
+            const y = event.y;
+
+            // Check if mouse is within chart area
+            if (x >= chartArea.left && x <= chartArea.right &&
+                y >= chartArea.top && y <= chartArea.bottom) {
+                chart.crosshair.targetX = x;
+                chart.crosshair.targetY = y;
+                chart.crosshair.visible = true;
+
+                // Initialize position if first time
+                if (chart.crosshair.x === null) {
+                    chart.crosshair.x = x;
+                    chart.crosshair.y = y;
+                }
+            } else {
+                chart.crosshair.visible = false;
+            }
+        } else if (event.type === 'mouseout') {
+            chart.crosshair.visible = false;
+        }
+
+        chart.draw();
+    },
+
+    beforeDraw(chart) {
+        const crosshair = chart.crosshair;
+        if (!crosshair) return;
+
+        // Smooth interpolation (lerp)
+        const lerp = (start, end, factor) => start + (end - start) * factor;
+        const smoothFactor = 0.3; // Adjust for smoother/faster movement
+
+        if (crosshair.targetX !== null && crosshair.x !== null) {
+            crosshair.x = lerp(crosshair.x, crosshair.targetX, smoothFactor);
+            crosshair.y = lerp(crosshair.y, crosshair.targetY, smoothFactor);
+        }
+    },
+
+    afterDatasetsDraw(chart) {
+        const crosshair = chart.crosshair;
+        if (!crosshair || !crosshair.visible) return;
+
+        const { ctx, chartArea } = chart;
+        const { left, right, top, bottom } = chartArea;
+        const x = crosshair.x;
+        const y = crosshair.y;
+
+        if (x === null || y === null) return;
+
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+
+        // Draw vertical line
+        ctx.beginPath();
+        ctx.moveTo(x, top);
+        ctx.lineTo(x, bottom);
+        ctx.stroke();
+
+        // Draw horizontal line
+        ctx.beginPath();
+        ctx.moveTo(left, y);
+        ctx.lineTo(right, y);
+        ctx.stroke();
+
+        // Draw crosshair center point
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+        ctx.beginPath();
+        ctx.arc(x, y, 4, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Outer ring
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x, y, 8, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.restore();
+
+        // Request next frame for smooth animation
+        if (crosshair.visible &&
+            (Math.abs(crosshair.x - crosshair.targetX) > 0.5 ||
+             Math.abs(crosshair.y - crosshair.targetY) > 0.5)) {
+            requestAnimationFrame(() => chart.draw());
+        }
+    }
+};
+
+// Register the crosshair plugin globally
+Chart.register(crosshairPlugin);
+
 const SECTORS = [
     { ticker: 'XLB', name: 'Materials', color: '#f97316' },
     { ticker: 'XLE', name: 'Energy', color: '#3b82f6' },
