@@ -1,28 +1,18 @@
 // Sector Z-Score Dashboard v4 - Simplified
 // Single sector view with S&P 500 comparison
 
-// Crosshair plugin for smooth hover effect
+// Crosshair plugin for smooth hover effect - snaps to nearest data point
 const crosshairPlugin = {
     id: 'crosshair',
 
-    // State for smooth animation
-    state: {
-        currentX: null,
-        currentY: null,
-        targetX: null,
-        targetY: null,
-        visible: false,
-        animationFrame: null
-    },
-
     afterInit(chart) {
-        // Initialize state for each chart instance
         chart.crosshair = {
             x: null,
             y: null,
             targetX: null,
             targetY: null,
-            visible: false
+            visible: false,
+            dataIndex: null
         };
     },
 
@@ -33,20 +23,47 @@ const crosshairPlugin = {
         if (!chartArea) return;
 
         if (event.type === 'mousemove') {
-            const x = event.x;
-            const y = event.y;
+            const mouseX = event.x;
 
-            // Check if mouse is within chart area
-            if (x >= chartArea.left && x <= chartArea.right &&
-                y >= chartArea.top && y <= chartArea.bottom) {
-                chart.crosshair.targetX = x;
-                chart.crosshair.targetY = y;
+            // Check if mouse is within chart area (only check X - full height works)
+            if (mouseX >= chartArea.left && mouseX <= chartArea.right &&
+                event.y >= chartArea.top && event.y <= chartArea.bottom) {
+
+                // Find nearest data point based on x position
+                const dataset = chart.data.datasets[0];
+                if (!dataset || !dataset.data || dataset.data.length === 0) return;
+
+                const xScale = chart.scales.x;
+                const yScale = chart.scales.y;
+
+                // Find the closest data point to the mouse X position
+                let closestIndex = 0;
+                let closestDistance = Infinity;
+
+                for (let i = 0; i < dataset.data.length; i++) {
+                    const dataPoint = dataset.data[i];
+                    const pointX = xScale.getPixelForValue(dataPoint.x);
+                    const distance = Math.abs(pointX - mouseX);
+
+                    if (distance < closestDistance) {
+                        closestDistance = distance;
+                        closestIndex = i;
+                    }
+                }
+
+                const closestPoint = dataset.data[closestIndex];
+                const snapX = xScale.getPixelForValue(closestPoint.x);
+                const snapY = yScale.getPixelForValue(closestPoint.y);
+
+                chart.crosshair.targetX = snapX;
+                chart.crosshair.targetY = snapY;
                 chart.crosshair.visible = true;
+                chart.crosshair.dataIndex = closestIndex;
 
                 // Initialize position if first time
                 if (chart.crosshair.x === null) {
-                    chart.crosshair.x = x;
-                    chart.crosshair.y = y;
+                    chart.crosshair.x = snapX;
+                    chart.crosshair.y = snapY;
                 }
             } else {
                 chart.crosshair.visible = false;
@@ -64,7 +81,7 @@ const crosshairPlugin = {
 
         // Smooth interpolation (lerp)
         const lerp = (start, end, factor) => start + (end - start) * factor;
-        const smoothFactor = 0.3; // Adjust for smoother/faster movement
+        const smoothFactor = 0.35;
 
         if (crosshair.targetX !== null && crosshair.x !== null) {
             crosshair.x = lerp(crosshair.x, crosshair.targetX, smoothFactor);
@@ -84,34 +101,34 @@ const crosshairPlugin = {
         if (x === null || y === null) return;
 
         ctx.save();
+
+        // Draw vertical line (full height)
         ctx.setLineDash([4, 4]);
         ctx.lineWidth = 1;
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-
-        // Draw vertical line
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
         ctx.beginPath();
         ctx.moveTo(x, top);
         ctx.lineTo(x, bottom);
         ctx.stroke();
 
-        // Draw horizontal line
+        // Draw horizontal line (full width)
         ctx.beginPath();
         ctx.moveTo(left, y);
         ctx.lineTo(right, y);
         ctx.stroke();
 
-        // Draw crosshair center point
+        // Draw point indicator on the data
         ctx.setLineDash([]);
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
         ctx.beginPath();
-        ctx.arc(x, y, 4, 0, Math.PI * 2);
+        ctx.arc(x, y, 5, 0, Math.PI * 2);
         ctx.fill();
 
-        // Outer ring
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+        // Outer glow ring
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(x, y, 8, 0, Math.PI * 2);
+        ctx.arc(x, y, 10, 0, Math.PI * 2);
         ctx.stroke();
 
         ctx.restore();
