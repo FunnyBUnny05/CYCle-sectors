@@ -345,6 +345,20 @@ function normalizePrices(prices) {
     return prices.map(p => ({ date: p.date, value: ((p.close / start) - 1) * 100 }));
 }
 
+function calculateAverageZScores() {
+    const averages = {};
+    SECTORS.forEach(sector => {
+        const zData = sectorZScores[sector.ticker];
+        if (zData && zData.length > 0) {
+            const sum = zData.reduce((acc, d) => acc + d.value, 0);
+            averages[sector.ticker] = sum / zData.length;
+        } else {
+            averages[sector.ticker] = null;
+        }
+    });
+    return averages;
+}
+
 function setStatus(status, text) {
     document.getElementById('statusDot').className = 'status-dot' + (status === 'loading' ? ' loading' : status === 'error' ? ' error' : '');
     document.getElementById('statusText').textContent = text;
@@ -389,24 +403,50 @@ function renderChart() {
     const valStr = z !== undefined ? `${z >= 0 ? '+' : ''}${z.toFixed(2)}` : '...';
     const bench = document.getElementById('benchmark').value;
     
+    const averages = calculateAverageZScores();
+    const sortedByAvg = [...SECTORS].sort((a, b) => {
+        const aAvg = averages[a.ticker] ?? 999;
+        const bAvg = averages[b.ticker] ?? 999;
+        return aAvg - bAvg;
+    });
+
+    const avgZScoreHTML = sortedByAvg.map(sector => {
+        const avg = averages[sector.ticker];
+        const avgCls = avg === null ? '' : avg < -1 ? 'negative' : avg > 1 ? 'positive' : 'neutral';
+        const avgStr = avg !== null ? `${avg >= 0 ? '+' : ''}${avg.toFixed(2)}` : '...';
+
+        return `<div class="avg-zscore-item">
+            <div class="sector-info">
+                <span class="dot" style="background:${sector.color}"></span>
+                <span class="ticker">${sector.ticker}</span>
+            </div>
+            <span class="avg-value ${avgCls}">${avgStr}</span>
+        </div>`;
+    }).join('');
+
     container.innerHTML = `
         <div class="chart-head">
             <div class="title" style="color:${s.color}">${s.name} <span class="tk">${s.ticker}</span></div>
             <div class="zscore-display"><span class="label">Z-Score:</span><span class="val ${valCls}">${valStr}</span></div>
         </div>
-        
+
         <div class="chart-section">
             <div class="chart-label">Cyclical Z-Score (vs ${bench})</div>
             <div class="chart-wrap zscore-chart"><canvas id="zscoreChart"></canvas></div>
         </div>
-        
+
         <div class="chart-section">
             <div class="chart-label">Price Performance</div>
             <div class="legend"><span><i style="background:${s.color}"></i>${s.ticker}</span><span><i style="background:rgba(255,255,255,0.5)"></i>${bench}</span></div>
             <div class="chart-wrap price-chart"><canvas id="priceChart"></canvas></div>
         </div>
+
+        <div class="avg-zscore-section">
+            <div class="avg-zscore-title">Average Z-Score by Sector</div>
+            <div class="avg-zscore-grid">${avgZScoreHTML}</div>
+        </div>
     `;
-    
+
     createZScoreChart(selectedSector, s.color);
     createPriceChart(selectedSector, s.color, bench);
 }
