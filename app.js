@@ -403,26 +403,16 @@ function renderChart() {
     const valStr = z !== undefined ? `${z >= 0 ? '+' : ''}${z.toFixed(2)}` : '...';
     const bench = document.getElementById('benchmark').value;
     
-    const averages = calculateAverageZScores();
-    const sortedByAvg = [...SECTORS].sort((a, b) => {
-        const aAvg = averages[a.ticker] ?? 999;
-        const bAvg = averages[b.ticker] ?? 999;
-        return aAvg - bAvg;
-    });
+    // Calculate average z-score for the selected sector
+    const zData = sectorZScores[selectedSector];
+    let avgZScore = null;
+    if (zData && zData.length > 0) {
+        const sum = zData.reduce((acc, d) => acc + d.value, 0);
+        avgZScore = sum / zData.length;
+    }
 
-    const avgZScoreHTML = sortedByAvg.map(sector => {
-        const avg = averages[sector.ticker];
-        const avgCls = avg === null ? '' : avg < -1 ? 'negative' : avg > 1 ? 'positive' : 'neutral';
-        const avgStr = avg !== null ? `${avg >= 0 ? '+' : ''}${avg.toFixed(2)}` : '...';
-
-        return `<div class="avg-zscore-item">
-            <div class="sector-info">
-                <span class="dot" style="background:${sector.color}"></span>
-                <span class="ticker">${sector.ticker}</span>
-            </div>
-            <span class="avg-value ${avgCls}">${avgStr}</span>
-        </div>`;
-    }).join('');
+    const avgCls = avgZScore === null ? '' : avgZScore < -1 ? 'negative' : avgZScore > 1 ? 'positive' : 'neutral';
+    const avgStr = avgZScore !== null ? `${avgZScore >= 0 ? '+' : ''}${avgZScore.toFixed(2)}` : '...';
 
     container.innerHTML = `
         <div class="chart-head">
@@ -442,8 +432,7 @@ function renderChart() {
         </div>
 
         <div class="avg-zscore-section">
-            <div class="avg-zscore-title">Average Z-Score by Sector</div>
-            <div class="avg-zscore-grid">${avgZScoreHTML}</div>
+            <div class="avg-zscore-title">Average Z-Score: <span class="avg-value ${avgCls}" style="margin-left: 10px;">${avgStr}</span></div>
         </div>
     `;
 
